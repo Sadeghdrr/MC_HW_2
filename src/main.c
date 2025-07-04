@@ -48,7 +48,14 @@ static inline uint64_t fnv1a64(const char *data, size_t len);
 static void *worker(void *arg);
 static int ensure_table_and_locks(size_t size);
 static void cleanup_table_and_locks(void);
+static void write_operation_results(const ProgramArgs *args, int op_index, const char *action,
+                                   size_t lineCount, StringMetadata *metadata, 
+                                   size_t *indices, char *results, 
+                                   long long elapsed_ms, size_t total_collisions);
+static int execute_hash_operation(const ProgramArgs *args, int op_index, const char *action,
+                                 size_t lineCount, StringMetadata *metadata);
 
+// Function to parse size with K/M suffix
 size_t parse_size(const char *str) {
     size_t len = strlen(str);
     size_t multiplier = 1;
@@ -68,6 +75,7 @@ size_t parse_size(const char *str) {
     return strtoull(num, NULL, 10) * multiplier;
 }
 
+// Function to deparse size to string with K/M suffix
 char* deparse_size(size_t size, char *buffer, size_t buffer_size) {
     if (size % 1000000 == 0) {
         snprintf(buffer, buffer_size, "%zuM", size / 1000000);
@@ -79,6 +87,7 @@ char* deparse_size(size_t size, char *buffer, size_t buffer_size) {
     return buffer;
 }
 
+// Function to parse command-line arguments
 int parse_arguments(int argc, char *argv[], ProgramArgs *args) {
     args->num_operations = 0;
     int found_data_size = 0, found_threads = 0, found_tsize = 0;
@@ -159,14 +168,14 @@ static inline uint64_t fnv1a64(const char *data, size_t len) {
 // Ensure global hash table and locks are allocated
 static int ensure_table_and_locks(size_t size) {
     if (g_table) return 0;
-    
+
     g_table_size = size;
     g_table = (HashEntry *)calloc(g_table_size, sizeof(HashEntry));
     if (!g_table) {
         perror("Unable to allocate hash table");
         return -1;
     }
-    
+
     bucketLocks = (pthread_mutex_t *)malloc(g_table_size * sizeof(pthread_mutex_t));
     if (!bucketLocks) {
         perror("Unable to allocate locks");
@@ -174,11 +183,11 @@ static int ensure_table_and_locks(size_t size) {
         g_table = NULL;
         return -1;
     }
-    
+
     for (size_t i = 0; i < g_table_size; i++) {
         pthread_mutex_init(&bucketLocks[i], NULL);
     }
-    
+
     return 0;
 }
 
@@ -191,7 +200,7 @@ static void cleanup_table_and_locks(void) {
         free(bucketLocks);
         bucketLocks = NULL;
     }
-    
+
     if (g_table) {
         for (size_t i = 0; i < g_table_size; i++) {
             if (g_table[i].key) {
@@ -208,22 +217,22 @@ static void cleanup_table_and_locks(void) {
 static void *worker(void *arg) {
     WorkerArgs *workerArg = (WorkerArgs *)arg;
     size_t thread_collisions = 0;
-    
+
     for (size_t itemIndex = workerArg->start; itemIndex < workerArg->end; ++itemIndex) {
         const char *currentString = workerArg->meta[itemIndex].ptr;
         size_t stringLength = workerArg->meta[itemIndex].length;
-        
+
         uint64_t hash = fnv1a64(currentString, stringLength);
         size_t tablePos = hash % g_table_size;
         size_t first_tombstone = (size_t)(-1);
         size_t local_collisions = 0;
-        
+
         if (strcmp(workerArg->action, "insert") == 0) {
             // Insert operation
             while (1) {
                 pthread_mutex_lock(&bucketLocks[tablePos]);
                 HashEntry *e = &g_table[tablePos];
-                
+
                 if (e->key == NULL) {
                     if (e->tombstone) {
                         // Found tombstone, remember first one
@@ -238,7 +247,7 @@ static void *worker(void *arg) {
                             pthread_mutex_unlock(&bucketLocks[tablePos]);
                             pthread_mutex_lock(&bucketLocks[target]);
                         }
-                        
+
                         g_table[target].key = malloc(sizeof(StringMetadata));
                         if (g_table[target].key) {
                             g_table[target].key->ptr = malloc(stringLength + 1);
@@ -278,7 +287,7 @@ static void *worker(void *arg) {
             while (1) {
                 pthread_mutex_lock(&bucketLocks[tablePos]);
                 HashEntry *e = &g_table[tablePos];
-                
+
                 if (e->key == NULL) {
                     if (e->tombstone) {
                         // Keep probing past tombstones
@@ -307,12 +316,12 @@ static void *worker(void *arg) {
                     pthread_mutex_unlock(&bucketLocks[tablePos]);
                     local_collisions++;
                 }
-                
+
                 tablePos = (tablePos + 1) % g_table_size;
             }
         }
     }
-    
+
     *(workerArg->collision_count) = thread_collisions;
     return NULL;
 }
@@ -386,10 +395,160 @@ int read_data(const char *filename, size_t lineCount, StringMetadata *metadata, 
     return 0;
 }
 
+// Helper function to write operation results to file
+static void write_operation_results(const ProgramArgs *args, int op_index, const char *action,
+                                   size_t lineCount, StringMetadata *metadata, 
+                                   size_t *indices, char *results, 
+                                   long long elapsed_ms, size_t total_collisions) {
+    // Build flow string for filename
+    char flow[256] = "";
+    for (int j = 0; j < args->num_operations; ++j) {
+        strcat(flow, args->action[j]);
+        if (j + 1 < args->num_operations) strcat(flow, "_");
+    }
+
+    // Write results to file
+    char outfile[512];
+    char data_size_str[32], tsize_str[32];
+    deparse_size(args->data_size, data_size_str, sizeof(data_size_str));
+    deparse_size(args->tsize, tsize_str, sizeof(tsize_str));
+    snprintf(outfile, sizeof(outfile),
+             "results/Results_HW2_MCC_030402_401106039_%s_%d_%s_%s.txt",
+             data_size_str, args->threads, tsize_str, flow);
+
+    FILE *out = fopen(outfile, (op_index == 0) ? "w" : "a");
+    if (!out) {
+        perror("Cannot open results file");
+        return;
+    }
+
+    fprintf(out, "Operation %d (%s):\n", op_index + 1, action);
+    fprintf(out, "ExecutionTime: %lld ms\n", elapsed_ms);
+    fprintf(out, "NumberOfHandledCollision: %zu\n", total_collisions);
+
+    if (strcmp(action, "insert") == 0) {
+        for (size_t j = 0; j < lineCount; ++j) {
+            fprintf(out, "%s:%zu:%c", metadata[j].ptr, indices[j], results[j]);
+            if (j + 1 < lineCount) fprintf(out, ", ");
+        }
+    } else if (strcmp(action, "delete") == 0) {
+        // For delete: only output successful deletions
+        int first = 1;
+        for (size_t j = 0; j < lineCount; ++j) {
+            if (results[j] == 'T') { // Successfully deleted
+                if (!first) fprintf(out, ", ");
+                fprintf(out, "%s:%zu:%c", metadata[j].ptr, indices[j], results[j]);
+                first = 0;
+            } else {
+                // Failed deletion: only output Data:F
+                if (!first) fprintf(out, ", ");
+                fprintf(out, "%s:%c", metadata[j].ptr, results[j]);
+                first = 0;
+            }
+        }
+    }
+
+    fprintf(out, "\n\n");
+    fclose(out);
+}
+
+// Helper function to execute hash operation (insert or delete)
+static int execute_hash_operation(const ProgramArgs *args, int op_index, const char *action,
+                                 size_t lineCount, StringMetadata *metadata) {
+    printf("%s %zu records...\n", 
+           (strcmp(action, "insert") == 0) ? "Inserting" : "Deleting", lineCount);
+
+    // Ensure hash table and locks are initialized
+    if (ensure_table_and_locks(args->tsize) != 0) {
+        return 1;
+    }
+
+    // Allocate arrays for results
+    size_t *indices = (size_t *)malloc(lineCount * sizeof(size_t));
+    char *results = (char *)malloc(lineCount * sizeof(char));
+    if (!indices || !results) {
+        perror("Memory allocation failed for results");
+        free(indices);
+        free(results);
+        return 1;
+    }
+
+    // Setup threading
+    int nthreads = args->threads;
+    if (nthreads < 1) nthreads = 1;
+    if ((size_t)nthreads > lineCount) nthreads = (int)lineCount;
+
+    pthread_t *threads = (pthread_t *)malloc(nthreads * sizeof(pthread_t));
+    WorkerArgs *wargs = (WorkerArgs *)malloc(nthreads * sizeof(WorkerArgs));
+    size_t *thread_collisions = (size_t *)calloc(nthreads, sizeof(size_t));
+
+    if (!threads || !wargs || !thread_collisions) {
+        perror("Thread allocation failed");
+        free(threads);
+        free(wargs);
+        free(thread_collisions);
+        free(indices);
+        free(results);
+        return 1;
+    }
+
+    size_t chunk = (lineCount + nthreads - 1) / nthreads;
+
+    // Start timing
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+
+    // Create and start worker threads
+    for (int t = 0; t < nthreads; ++t) {
+        size_t start = t * chunk;
+        size_t end = start + chunk;
+        if (end > lineCount) end = lineCount;
+
+        wargs[t] = (WorkerArgs){
+            .start = start,
+            .end = end,
+            .meta = metadata,
+            .out_indices = indices,
+            .out_results = results,
+            .collision_count = &thread_collisions[t],
+            .action = action
+        };
+        pthread_create(&threads[t], NULL, worker, &wargs[t]);
+    }
+
+    // Wait for all threads to complete
+    for (int t = 0; t < nthreads; ++t) {
+        pthread_join(threads[t], NULL);
+    }
+
+    // End timing
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long long elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000LL + (t1.tv_nsec - t0.tv_nsec) / 1000000LL;
+
+    // Sum up collision counts
+    size_t total_collisions = 0;
+    for (int t = 0; t < nthreads; ++t) {
+        total_collisions += thread_collisions[t];
+    }
+
+    // Write results to file
+    write_operation_results(args, op_index, action, lineCount, metadata, 
+                           indices, results, elapsed_ms, total_collisions);
+
+    // Cleanup thread resources
+    free(threads);
+    free(wargs);
+    free(thread_collisions);
+    free(indices);
+    free(results);
+
+    return 0;
+}
+
 int run_app(const ProgramArgs *args) {
     for (int i = 0; i < args->num_operations; ++i) {
         printf(">>> Action: %s on file: %s\n", args->action[i], args->input_files[i]);
-        
+
         size_t lineCount = 0, totalDataSize = 0;
         if (preprocess(args->input_files[i], &lineCount, &totalDataSize) != 0) return 1;
 
@@ -407,260 +566,19 @@ int run_app(const ProgramArgs *args) {
             free(data);
             return 1;
         }
-
-        
         if (strcmp(args->action[i], "insert") == 0) {
-            printf("Inserting %zu records...\n", lineCount);
-
-            // Ensure hash table and locks are initialized
-            if (ensure_table_and_locks(args->tsize) != 0) {
+            if (execute_hash_operation(args, i, "insert", lineCount, metadata) != 0) {
                 free(metadata);
                 free(data);
                 return 1;
             }
-            
-            // Allocate arrays for results
-            size_t *indices = (size_t *)malloc(lineCount * sizeof(size_t));
-            char *results = (char *)malloc(lineCount * sizeof(char));
-            if (!indices || !results) {
-                perror("Memory allocation failed for results");
-                free(indices);
-                free(results);
+        } else if (strcmp(args->action[i], "delete") == 0) {
+            if (execute_hash_operation(args, i, "delete", lineCount, metadata) != 0) {
                 free(metadata);
                 free(data);
                 return 1;
             }
-            
-            // Setup threading
-            int nthreads = args->threads;
-            if (nthreads < 1) nthreads = 1;
-            if ((size_t)nthreads > lineCount) nthreads = (int)lineCount;
-            
-            pthread_t *threads = (pthread_t *)malloc(nthreads * sizeof(pthread_t));
-            WorkerArgs *wargs = (WorkerArgs *)malloc(nthreads * sizeof(WorkerArgs));
-            size_t *thread_collisions = (size_t *)calloc(nthreads, sizeof(size_t));
-            
-            if (!threads || !wargs || !thread_collisions) {
-                perror("Thread allocation failed");
-                free(threads);
-                free(wargs);
-                free(thread_collisions);
-                free(indices);
-                free(results);
-                free(metadata);
-                free(data);
-                return 1;
-            }
-            
-            size_t chunk = (lineCount + nthreads - 1) / nthreads;
-            
-            // Start timing
-            struct timespec t0, t1;
-            clock_gettime(CLOCK_MONOTONIC, &t0);
-            
-            // Create and start worker threads
-            for (int t = 0; t < nthreads; ++t) {
-                size_t start = t * chunk;
-                size_t end = start + chunk;
-                if (end > lineCount) end = lineCount;
-                
-                wargs[t] = (WorkerArgs){
-                    .start = start,
-                    .end = end,
-                    .meta = metadata,
-                    .out_indices = indices,
-                    .out_results = results,
-                    .collision_count = &thread_collisions[t],
-                    .action = "insert"
-                };
-                pthread_create(&threads[t], NULL, worker, &wargs[t]);
-            }
-            
-            // Wait for all threads to complete
-            for (int t = 0; t < nthreads; ++t) {
-                pthread_join(threads[t], NULL);
-            }
-            
-            // End timing
-            clock_gettime(CLOCK_MONOTONIC, &t1);
-            long long elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000LL + (t1.tv_nsec - t0.tv_nsec) / 1000000LL;
-            
-            // Sum up collision counts
-            size_t total_collisions = 0;
-            for (int t = 0; t < nthreads; ++t) {
-                total_collisions += thread_collisions[t];
-            }
-            
-            // Build flow string for filename
-            char flow[256] = "";
-            for (int j = 0; j < args->num_operations; ++j) {
-                strcat(flow, args->action[j]);
-                if (j + 1 < args->num_operations) strcat(flow, "_");
-            }
-            
-            // Write results to file
-            char outfile[512];
-            char data_size_str[32], tsize_str[32];
-            deparse_size(args->data_size, data_size_str, sizeof(data_size_str));
-            deparse_size(args->tsize, tsize_str, sizeof(tsize_str));
-            snprintf(outfile, sizeof(outfile),
-                     "results/Results_HW2_MCC_030402_401106039_%s_%d_%s_%s.txt",
-                     data_size_str, args->threads, tsize_str, flow);
-            
-            FILE *out = fopen(outfile, (i == 0) ? "w" : "a");
-            if (!out) {
-                perror("Cannot open results file");
-            } else {
-                fprintf(out, "Operation %d (insert):\n", i + 1);
-                fprintf(out, "ExecutionTime: %lld ms\n", elapsed_ms);
-                fprintf(out, "NumberOfHandledCollision: %zu\n", total_collisions);
-                
-                for (size_t j = 0; j < lineCount; ++j) {
-                    fprintf(out, "%s:%zu:%c", metadata[j].ptr, indices[j], results[j]);
-                    if (j + 1 < lineCount) fprintf(out, ", ");
-                }
-                fprintf(out, "\n\n");
-                fclose(out);
-            }
-            
-            // Cleanup thread resources
-            free(threads);
-            free(wargs);
-            free(thread_collisions);
-            free(indices);
-            free(results);
-        }
-        else if (strcmp(args->action[i], "delete") == 0) {
-            printf("Deleting %zu records...\n", lineCount);
-
-            // Ensure hash table and locks are initialized
-            if (ensure_table_and_locks(args->tsize) != 0) {
-                free(metadata);
-                free(data);
-                return 1;
-            }
-            
-            // Allocate arrays for results
-            size_t *indices = (size_t *)malloc(lineCount * sizeof(size_t));
-            char *results = (char *)malloc(lineCount * sizeof(char));
-            if (!indices || !results) {
-                perror("Memory allocation failed for results");
-                free(indices);
-                free(results);
-                free(metadata);
-                free(data);
-                return 1;
-            }
-            
-            // Setup threading
-            int nthreads = args->threads;
-            if (nthreads < 1) nthreads = 1;
-            if ((size_t)nthreads > lineCount) nthreads = (int)lineCount;
-            
-            pthread_t *threads = (pthread_t *)malloc(nthreads * sizeof(pthread_t));
-            WorkerArgs *wargs = (WorkerArgs *)malloc(nthreads * sizeof(WorkerArgs));
-            size_t *thread_collisions = (size_t *)calloc(nthreads, sizeof(size_t));
-            
-            if (!threads || !wargs || !thread_collisions) {
-                perror("Thread allocation failed");
-                free(threads);
-                free(wargs);
-                free(thread_collisions);
-                free(indices);
-                free(results);
-                free(metadata);
-                free(data);
-                return 1;
-            }
-            
-            size_t chunk = (lineCount + nthreads - 1) / nthreads;
-            
-            // Start timing
-            struct timespec t0, t1;
-            clock_gettime(CLOCK_MONOTONIC, &t0);
-            
-            // Create and start worker threads
-            for (int t = 0; t < nthreads; ++t) {
-                size_t start = t * chunk;
-                size_t end = start + chunk;
-                if (end > lineCount) end = lineCount;
-                
-                wargs[t] = (WorkerArgs){
-                    .start = start,
-                    .end = end,
-                    .meta = metadata,
-                    .out_indices = indices,
-                    .out_results = results,
-                    .collision_count = &thread_collisions[t],
-                    .action = "delete"
-                };
-                pthread_create(&threads[t], NULL, worker, &wargs[t]);
-            }
-            
-            // Wait for all threads to complete
-            for (int t = 0; t < nthreads; ++t) {
-                pthread_join(threads[t], NULL);
-            }
-            
-            // End timing
-            clock_gettime(CLOCK_MONOTONIC, &t1);
-            long long elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000LL + (t1.tv_nsec - t0.tv_nsec) / 1000000LL;
-            
-            // Sum up collision counts
-            size_t total_collisions = 0;
-            for (int t = 0; t < nthreads; ++t) {
-                total_collisions += thread_collisions[t];
-            }
-            
-            // Build flow string for filename
-            char flow[256] = "";
-            for (int j = 0; j < args->num_operations; ++j) {
-                strcat(flow, args->action[j]);
-                if (j + 1 < args->num_operations) strcat(flow, "_");
-            }
-              // Write results to file
-            char outfile[512];
-            char data_size_str[32], tsize_str[32];
-            deparse_size(args->data_size, data_size_str, sizeof(data_size_str));
-            deparse_size(args->tsize, tsize_str, sizeof(tsize_str));
-            snprintf(outfile, sizeof(outfile),
-                     "results/Results_HW2_MCC_030402_401106039_%s_%d_%s_%s.txt",
-                     data_size_str, args->threads, tsize_str, flow);
-            
-            FILE *out = fopen(outfile, (i == 0) ? "w" : "a");
-            if (!out) {
-                perror("Cannot open results file");
-            } else {
-                fprintf(out, "Operation %d (delete):\n", i + 1);
-                fprintf(out, "ExecutionTime: %lld ms\n", elapsed_ms);
-                fprintf(out, "NumberOfHandledCollision: %zu\n", total_collisions);
-                
-                // For delete: only output successful deletions
-                int first = 1;
-                for (size_t j = 0; j < lineCount; ++j) {
-                    if (results[j] == 'T') { // Successfully deleted
-                        if (!first) fprintf(out, ", ");
-                        fprintf(out, "%s:%zu:%c", metadata[j].ptr, indices[j], results[j]);
-                        first = 0;
-                    } else {
-                        // Failed deletion: only output Data:F
-                        if (!first) fprintf(out, ", ");
-                        fprintf(out, "%s:%c", metadata[j].ptr, results[j]);
-                        first = 0;
-                    }
-                }
-                fprintf(out, "\n\n");
-                fclose(out);
-            }
-            
-            // Cleanup thread resources
-            free(threads);
-            free(wargs);
-            free(thread_collisions);
-            free(indices);
-            free(results);
-        } 
-        else {
+        } else {
             fprintf(stderr, "Unknown action: %s\n", args->action[i]);
         }
 
