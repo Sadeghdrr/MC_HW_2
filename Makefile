@@ -71,13 +71,13 @@ perf-test: $(TARGET)
 			600K) tsize3=360K ; tsize4=480K ; tsize5=600K ;; \
 		esac; \
 		for threads in 1 2 4 8 16 32 64 128 256 512 1024; do \
-			for tsize in $$tsize2 $$tsize3 $$tsize4; do \
+			for tsize in $$tsize3 $$tsize4 $$tsize5; do \
 				echo "Testing: data_size=$$datasize threads=$$threads tsize=$$tsize"; \
 				$(TARGET) --data_size $$datasize \
 				          --threads $$threads \
 				          --tsize $$tsize \
 				          --flow insert insert delete insert \
-				          --input $${datasize}_set1.txt $${datasize}_set2.txt $${datasize}_set1.txt $${datasize}_set2.txt \
+				          --input $${datasize}_set1.txt $${datasize}_set2.txt $${datasize}_set1.txt $${datasize}_set2.txt; \
 			done; \
 		done; \
 	done
