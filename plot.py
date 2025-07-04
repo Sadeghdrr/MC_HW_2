@@ -129,18 +129,18 @@ for ds, ts_dict in sorted(by_ds.items()):
     x = np.arange(len(threads))
     width = 0.8 / n_ts
 
-    fig, ax = plt.subplots(figsize=(8,4))
-    cmap = plt.cm.viridis
-    norm = plt.Normalize(vmin=0, vmax=coll_matrix.max())
+    fig, ax = plt.subplots(figsize=(12,6))
+    # Use solid colors for each group (table size)
+    color_list = plt.cm.tab10.colors  # up to 10 distinct colors
 
     for i, ts in enumerate(tsizes):
         vals = coll_matrix[i]
-        colors = cmap(norm(vals))
+        color = color_list[i % len(color_list)]
         ax.bar(
             x + (i - n_ts/2)*width + width/2,
             vals,
             width=width,
-            color=colors,
+            color=color,
             edgecolor="black",
             label=f"{ts}K"
         )
@@ -162,11 +162,8 @@ for ds, ts_dict in sorted(by_ds.items()):
     ax.set_title(f"Collisions vs Threads\nDataset: {ds}K (all T-sizes)")
     ax.legend(title="Table Size (K)", bbox_to_anchor=(1.02,1), loc="upper left")
 
-    # colorbar
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array([])
-    cbar = fig.colorbar(sm, ax=ax, pad=0.02)
-    cbar.set_label("Total # Handled Collisions")
+    # Remove colorbar for collision group plot
+    # plt.cm.ScalarMappable and fig.colorbar are omitted
 
     plt.tight_layout()
     outpath = os.path.join(PLOTS_DIR, f"collision_group_{ds}K.png")
