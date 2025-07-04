@@ -68,6 +68,17 @@ size_t parse_size(const char *str) {
     return strtoull(num, NULL, 10) * multiplier;
 }
 
+char* deparse_size(size_t size, char *buffer, size_t buffer_size) {
+    if (size % 1000000 == 0) {
+        snprintf(buffer, buffer_size, "%zuM", size / 1000000);
+    } else if (size % 1000 == 0) {
+        snprintf(buffer, buffer_size, "%zuK", size / 1000);
+    } else {
+        snprintf(buffer, buffer_size, "%zu", size);
+    }
+    return buffer;
+}
+
 int parse_arguments(int argc, char *argv[], ProgramArgs *args) {
     args->num_operations = 0;
     int found_data_size = 0, found_threads = 0, found_tsize = 0;
@@ -257,9 +268,9 @@ static void *worker(void *arg) {
                 } else {
                     // Different key, continue probing
                     pthread_mutex_unlock(&bucketLocks[tablePos]);
-                    local_collisions++;
+                    // Don't count collisions after first tombstone found
+                    if (first_tombstone == (size_t)(-1)) local_collisions++;
                 }
-                
                 tablePos = (tablePos + 1) % g_table_size;
             }
         } else if (strcmp(workerArg->action, "delete") == 0) {
@@ -400,9 +411,7 @@ int run_app(const ProgramArgs *args) {
         
         if (strcmp(args->action[i], "insert") == 0) {
             printf("Inserting %zu records...\n", lineCount);
-      
-            ////////////////////////////////////////Write Your Code//////////////////////////////////////////////
-            
+
             // Ensure hash table and locks are initialized
             if (ensure_table_and_locks(args->tsize) != 0) {
                 free(metadata);
@@ -491,9 +500,12 @@ int run_app(const ProgramArgs *args) {
             
             // Write results to file
             char outfile[512];
+            char data_size_str[32], tsize_str[32];
+            deparse_size(args->data_size, data_size_str, sizeof(data_size_str));
+            deparse_size(args->tsize, tsize_str, sizeof(tsize_str));
             snprintf(outfile, sizeof(outfile),
-                     "results/Results_HW2_MCC_030402_401106039_%zu_%d_%zu_%s.txt",
-                     args->data_size, args->threads, args->tsize, flow);
+                     "results/Results_HW2_MCC_030402_401106039_%s_%d_%s_%s.txt",
+                     data_size_str, args->threads, tsize_str, flow);
             
             FILE *out = fopen(outfile, (i == 0) ? "w" : "a");
             if (!out) {
@@ -517,15 +529,10 @@ int run_app(const ProgramArgs *args) {
             free(thread_collisions);
             free(indices);
             free(results);
-
-            /////////////////////////////////////////////////////////////////////////////////////////////////////
-
-
-        } else if (strcmp(args->action[i], "delete") == 0) {
+        }
+        else if (strcmp(args->action[i], "delete") == 0) {
             printf("Deleting %zu records...\n", lineCount);
-                
-            ////////////////////////////////////////Write Your Code//////////////////////////////////////////////
-            
+
             // Ensure hash table and locks are initialized
             if (ensure_table_and_locks(args->tsize) != 0) {
                 free(metadata);
@@ -611,12 +618,14 @@ int run_app(const ProgramArgs *args) {
                 strcat(flow, args->action[j]);
                 if (j + 1 < args->num_operations) strcat(flow, "_");
             }
-            
-            // Write results to file
+              // Write results to file
             char outfile[512];
+            char data_size_str[32], tsize_str[32];
+            deparse_size(args->data_size, data_size_str, sizeof(data_size_str));
+            deparse_size(args->tsize, tsize_str, sizeof(tsize_str));
             snprintf(outfile, sizeof(outfile),
-                     "results/Results_HW2_MCC_030402_401106039_%zu_%d_%zu_%s.txt",
-                     args->data_size, args->threads, args->tsize, flow);
+                     "results/Results_HW2_MCC_030402_401106039_%s_%d_%s_%s.txt",
+                     data_size_str, args->threads, tsize_str, flow);
             
             FILE *out = fopen(outfile, (i == 0) ? "w" : "a");
             if (!out) {
@@ -650,14 +659,10 @@ int run_app(const ProgramArgs *args) {
             free(thread_collisions);
             free(indices);
             free(results);
-
-            /////////////////////////////////////////////////////////////////////////////////////////////////////
-            
-        } else {
+        } 
+        else {
             fprintf(stderr, "Unknown action: %s\n", args->action[i]);
         }
-
-        
 
         free(metadata);
         free(data);
