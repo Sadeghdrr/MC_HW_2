@@ -422,7 +422,7 @@ static void write_operation_results(const ProgramArgs *args, int op_index, const
         return;
     }
 
-    fprintf(out, "Operation %d (%s):\n", op_index + 1, action);
+    fprintf(out, "Actions: %s\n", action);
     fprintf(out, "ExecutionTime: %lld ms\n", elapsed_ms);
     fprintf(out, "NumberOfHandledCollision: %zu\n", total_collisions);
 
@@ -448,7 +448,7 @@ static void write_operation_results(const ProgramArgs *args, int op_index, const
         }
     }
 
-    fprintf(out, "\n\n");
+    fprintf(out, "\n");
     fclose(out);
 }
 
